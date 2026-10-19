@@ -1,0 +1,59 @@
+# Qwen3.8-27B-FP8 vLLM 서빙 — 성능 개선안 (TP=2 → DP=2)
+#
+# 기존 대비 변경 사항
+#   1) --tensor-parallel-size 2  → 1, --data-parallel-size 2 추가
+#      GPU별 독립 엔진 2개, 외부 포트는 8100 하나 그대로(vLLM 내부 부하분산)
+#   2) --distributed-executor-backend mp, --disable-custom-all-reduce 제거 (TP=2 전용 옵션)
+#   3) --max-model-len 262144 → 131072
+#      qwen-code settings.json 의 contextWindowSize 도 131072 로 맞출 것
+#
+# 원복: 기존 docker-compose.yml 로 되돌린 뒤 docker compose up -d
+
+services:
+  vllm-qwen38-27b:
+    image: vllm/vllm-openai:v0.26.0
+    container_name: vllm-qwen38-27b
+    environment:
+      - TZ=Asia/Seoul
+      - CUDA_VISIBLE_DEVICES=0,1
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - OMP_NUM_THREADS=8
+      - TRITON_CACHE_DIR=/root/.cache/vllm/triton
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /data/models:/data/models
+      - /data/vllm-cache:/root/.cache/vllm
+    ports:
+      - '8100:8000'
+    ipc: host
+    shm_size: '48gb'
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --model /data/models/Qwen3.8-27B-FP8
+      --served-model-name Qwen3.8-27B-FP8
+      --port 8000
+      --tensor-parallel-size 1
+      --data-parallel-size 2
+      --dtype auto
+      --tokenizer-mode auto
+      --gpu-memory-utilization 0.90
+      --kv-cache-dtype fp8
+      --max-model-len 131072
+      --max-num-batched-tokens 24576
+      --max-num-seqs 128
+      --enable-chunked-prefill
+      --enable-prefix-caching
+      --reasoning-parser qwen3
+      --uvicorn-log-level warning
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
