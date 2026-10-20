@@ -1,0 +1,71 @@
+# Qwen3.8-27B-FP8 vLLM 서빙 — 1인 사용 / 100만 토큰 컨텍스트 버전
+#
+# docker-compose-dp-version.yml 대비 변경 사항
+#   1) TP=2 복귀 (1인 사용 시 단일 요청 속도·KV 용량 유리)
+#      → --data-parallel-size 제거, --distributed-executor-backend mp / --disable-custom-all-reduce 복원
+#   2) YaRN(factor 4)으로 컨텍스트 262,144 → 1,010,000 확장 (--hf-overrides)
+#      rope 값은 모델 config.json(text_config.rope_parameters) 기준
+#   3) --max-num-seqs 128 → 8 (1인 사용, 요청별 linear-attention 상태 메모리 절감)
+#   4) --max-num-batched-tokens 24576 → 32768 (긴 prefill 속도 개선)
+#
+# 주의: YaRN은 짧은 요청에도 항상 적용되어 품질이 소폭 저하될 수 있음
+#       → 긴 컨텍스트가 필요할 때만 이 파일로 띄우고, 평소에는 기본 compose 사용
+# 실행: docker compose -f docker-compose-dp-version.yml down
+#       docker compose -f docker-compose-1m.yml up -d
+
+services:
+  vllm-qwen38-27b:
+    image: vllm/vllm-openai:v0.26.0
+    container_name: vllm-qwen38-27b
+    environment:
+      - TZ=Asia/Seoul
+      - CUDA_VISIBLE_DEVICES=0,1
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - OMP_NUM_THREADS=8
+      - TRITON_CACHE_DIR=/root/.cache/vllm/triton
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /data/models:/data/models
+      - /data/vllm-cache:/root/.cache/vllm
+    ports:
+      - '8100:8000'
+    ipc: host
+    shm_size: '48gb'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --model /data/models/Qwen3.8-27B-FP8
+      --served-model-name Qwen3.8-27B-FP8
+      --port 8000
+      --tensor-parallel-size 2
+      --distributed-executor-backend mp
+      --disable-custom-all-reduce
+      --dtype auto
+      --tokenizer-mode auto
+      --gpu-memory-utilization 0.90
+      --kv-cache-dtype fp8
+      --max-model-len 1010000
+      --hf-overrides '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      --max-num-batched-tokens 32768
+      --max-num-seqs 8
+      --enable-chunked-prefill
+      --enable-prefix-caching
+      --reasoning-parser qwen3
+      --uvicorn-log-level warning
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 2}'
